@@ -6,6 +6,10 @@
 __version__ = '1.7.10'
 __author__ = "{phus.lu,hewigovens}@gmail.com (Phus Lu and Hewig Xu)"
 
+import sys
+# 如果Python的版本不是2.6或者2.7版本，则退出并给出提示信息，考虑到多操作系统的字符集，在此使用英文。
+sys.version[:3] in ('2.6', '2.7') or sys.exit(sys.stderr.write('Must python 2.6/2.7'))
+
 import sys, os, re, time, errno, binascii, zlib
 import struct, random, hashlib
 import fnmatch, base64, logging, ConfigParser
@@ -22,11 +26,17 @@ try:
 except ImportError:
     OpenSSL = None
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s - - %(asctime)s %(message)s', datefmt='[%d/%b/%Y %H:%M:%S]')
+# 此句是在配置logging模块的记录格式。
+logging.basicConfig(level=logging.INFO,
+                    format='%(levelname)s - - %(asctime)s %(message)s',
+                    datefmt='[%d/%b/%Y %H:%M:%S]')
 
 class Common(object):
-    '''global config module'''
+    '''全局配置相关的类。'''
+
     def __init__(self):
+        """会自动从proxy.py所在的目录底下找到proxy.ini，并通过ConfigParser模块来逐个读取。"""
+        # 其实下面这句是多余的，忽略之。
         ConfigParser.RawConfigParser.OPTCRE = re.compile(r'(?P<option>[^=\s][^=]*)\s*(?P<vi>[=])\s*(?P<value>.*)$')
         self.CONFIG = ConfigParser.ConfigParser()
         self.CONFIG.read(os.path.splitext(__file__)[0] + '.ini')
@@ -39,7 +49,9 @@ class Common(object):
         self.GAE_APPIDS           = self.CONFIG.get('gae', 'appid').replace('.appspot.com', '').split('|')
         self.GAE_PASSWORD         = self.CONFIG.get('gae', 'password').strip()
         self.GAE_PATH             = self.CONFIG.get('gae', 'path')
+        # 判断你是使用google_cn还是google_hk还是google_ipv6的服务器。
         self.GAE_PROFILE          = self.CONFIG.get('gae', 'profile')
+        # 默认的proxy.ini（基于goagent 1.7.10版本来说）没有设置debuglevel
         self.GAE_DEBUGLEVEL       = self.CONFIG.getint('gae', 'debuglevel') if self.CONFIG.has_option('gae', 'debuglevel') else 0
 
         self.PHP_ENABLE           = self.CONFIG.getint('php', 'enable')
@@ -52,8 +64,9 @@ class Common(object):
         self.PROXY_USERNAME       = self.CONFIG.get('proxy', 'username')
         self.PROXY_PASSWROD       = self.CONFIG.get('proxy', 'password')
 
+        # 以下的options（配置选项）都是基于self.GAE_PROFILE的配置的。因为不同的profile设定的mode或是hosts都不一样。
+        # 可以去proxy.ini里面看看这些profile。
         self.GOOGLE_MODE          = self.CONFIG.get(self.GAE_PROFILE, 'mode')
-        self.GOOGLE_CRLF          = self.CONFIG.getint(self.GAE_PROFILE, 'crlf') if self.CONFIG.has_option(self.GAE_PROFILE, 'crlf') else 0
         self.GOOGLE_HOSTS         = self.CONFIG.get(self.GAE_PROFILE, 'hosts').split('|')
         self.GOOGLE_SITES         = tuple(self.CONFIG.get(self.GAE_PROFILE, 'sites').split('|'))
         self.GOOGLE_FORCEHTTPS    = frozenset(self.CONFIG.get(self.GAE_PROFILE, 'forcehttps').split('|'))
@@ -62,6 +75,7 @@ class Common(object):
         self.FETCHMAX_LOCAL       = self.CONFIG.getint('fetchmax', 'local') if self.CONFIG.get('fetchmax', 'local') else 3
         self.FETCHMAX_SERVER      = self.CONFIG.get('fetchmax', 'server')
 
+        # ? 在线视频网站相关的options
         self.AUTORANGE_HOSTS      = tuple(self.CONFIG.get('autorange', 'hosts').split('|'))
         self.AUTORANGE_HOSTS_TAIL = tuple(x.rpartition('*')[2] for x in self.AUTORANGE_HOSTS)
         self.AUTORANGE_MAXSIZE    = self.CONFIG.getint('autorange', 'maxsize')
@@ -70,21 +84,30 @@ class Common(object):
 
         assert self.AUTORANGE_BUFSIZE <= self.AUTORANGE_WAITSIZE <= self.AUTORANGE_MAXSIZE
 
+        self.WEST_ENABLE          = self.CONFIG.getint('west', 'enable')
+        self.WEST_DNS             = self.CONFIG.get('west', 'dns')
+        self.WEST_SITES           = tuple(self.CONFIG.get('west', 'sites').split('|'))
+
+        # 伪装浏览器的相关options
         self.USERAGENT_ENABLE     = self.CONFIG.getint('useragent', 'enable')
         self.USERAGENT_STRING     = self.CONFIG.get('useragent', 'string')
 
+        # 爱心广告
         self.LOVE_ENABLE          = self.CONFIG.getint('love','enable')
         self.LOVE_TIMESTAMP       = self.CONFIG.get('love', 'timestamp')
-        self.LOVE_TIP             = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m:unichr(int(m.group(1),16)), self.CONFIG.get('love','tip')).split('|')
+        # ? 广告的字符串是用unicode编码的16进制方式存储的，在读入Python的时候通过unichr函数转成Python可识别的unicode编码。
+        self.LOVE_TIP             = self.CONFIG.get('love','tip').decode('unicode-escape').split('|')
 
         self.HOSTS                = dict((k, v) for k, v in self.CONFIG.items('hosts') if not k.startswith('.'))
         self.HOSTS_ENDSWITH_DICT  = dict((k, v) for k, v in self.CONFIG.items('hosts') if k.startswith('.'))
         self.HOSTS_ENDSWITH_TUPLE = tuple(k for k, v in self.CONFIG.items('hosts') if k.startswith('.'))
 
         self.build_gae_fetchserver()
+        # 将proxy.ini里面的php选项中的listen（本地监听端口）与fetchserver（远程抓取脚本的地址）按次序一一对应起来，存入dict（字典）中方便读取。
         self.PHP_FETCH_INFO       = dict(((listen.rpartition(':')[0], int(listen.rpartition(':')[-1])), (re.sub(r':\d+$', '', urlparse.urlparse(server).netloc), server)) for listen, server in zip(self.PHP_LISTEN.split('|'), self.PHP_FETCHSERVER.split('|')))
 
     def build_gae_fetchserver(self):
+        """根据你的appid来设置你的fetchserver。如http://keepagent.appspot.com/fetch.py"""
         self.GAE_FETCHHOST = '%s.appspot.com' % self.GAE_APPIDS[0]
         if not self.PROXY_ENABLE:
             # append '?' to url, it can avoid china telicom/unicom AD
@@ -93,6 +116,7 @@ class Common(object):
             self.GAE_FETCHSERVER = '%s://%s%s?' % (self.GOOGLE_MODE, random.choice(self.GOOGLE_HOSTS), self.GAE_PATH)
 
     def install_opener(self):
+        """如果你在proxy.ini里面设置了[proxy]->enable为True的话，则配置urllib2模块来应用你设置的代理服务器"""
         httplib.HTTPMessage = SimpleMessageClass
         if self.PROXY_ENABLE:
             proxy = '%s:%s@%s:%d'%(self.PROXY_USERNAME, self.PROXY_PASSWROD, self.PROXY_HOST, self.PROXY_PORT)
@@ -117,13 +141,18 @@ class Common(object):
             for (ip, port),(fetchhost, fetchserver) in common.PHP_FETCH_INFO.iteritems():
                 info += 'PHP Mode Listen : %s:%d\n' % (ip, port)
                 info += 'PHP FetchServer : %s\n' % fetchserver
+        if common.WEST_ENABLE:
+            info += 'West Mode Sites : %s\n' % '|'.join(self.WEST_SITES)
         info += '------------------------------------------------------\n'
         return info
 
 common = Common()
 
 class MultiplexConnection(object):
-    '''multiplex tcp connection class'''
+    '''multiplex tcp connection class
+
+    这个类用来建立并发tcp连接
+    '''
 
     retry = 3
     timeout = 8
@@ -135,6 +164,12 @@ class MultiplexConnection(object):
     window_max = 60
     window_ack = 0
 
+    ## ?
+    # @brief 初始化MultiplexConnection类时自动进行并发连接
+    #
+    # @param hosts 要连接的hosts列表
+    # @param port 端口号，一般为80。需int类型。
+    #
     def __init__(self, hosts, port):
         self.socket = None
         self._sockets = set([])
@@ -144,14 +179,18 @@ class MultiplexConnection(object):
             hosts = random.sample(hostlist, window) if len(hostlist) > window else hostlist
             logging.debug('MultiplexConnection try connect hosts=%s, port=%d', hosts, port)
             socks = []
+            # ? 只需判断一次sock_family，因为hosts要则走ipv4协议要则ipv6协议。
+            sock_family = socket.AF_INET6 if ':' in hosts[0] else socket.AF_INET
             for host in hosts:
-                sock_family = socket.AF_INET6 if ':' in host else socket.AF_INET
+                # 对于socket编程来说，sock_family一般就在socket.AF_INET或AF_INET6两者间，后者不如前者常见；
+                # 第二个选项的socket.SOCK_STREAM是tcp连接的意思，一般不是用它就是用socket.SOCK_DGRAM，后者代表udp连接。
                 sock = socket.socket(sock_family, socket.SOCK_STREAM)
                 sock.setblocking(0)
                 #logging.debug('MultiplexConnection connect_ex (%r, %r)', host, port)
                 err = sock.connect_ex((host, port))
                 self._sockets.add(sock)
                 socks.append(sock)
+            # TODO
             (_, outs, _) = select.select([], socks, [], timeout)
             if outs:
                 self.socket = outs[0]
@@ -172,13 +211,14 @@ class MultiplexConnection(object):
                 break
             else:
                 logging.warning('MultiplexConnection Cannot hosts %r:%r, window=%d', hosts, port, window)
-        else:
+        else: # ? 如果在尝试了`MultiplexConnection.retry`次数后，仍然连接不成功，则抛错。
             MultiplexConnection.window = min(int(round(window*1.5)), len(hostlist), self.window_max)
             MultiplexConnection.window_ack = 0
             MultiplexConnection.timeout = min(int(round(timeout*1.5)), self.timeout_max)
             MultiplexConnection.timeout_ack = 0
             raise RuntimeError(r'MultiplexConnection Connect hosts %s:%s fail %d times!' % (hosts, port, MultiplexConnection.retry))
     def close(self):
+        """遍历关闭所有打开的sockets"""
         for sock in self._sockets:
             try:
                 sock.close()
@@ -258,9 +298,37 @@ def socket_forward(local, remote, timeout=60, tick=2, bufsize=8192, maxping=None
         if idlecall:
             idlecall()
 
+def dns_resolve(host, dnsserver, dnscache={}, dnslock=threading.Lock()):
+    assert isinstance(host, basestring) and isinstance(dnsserver, basestring)
+    index = os.urandom(2)
+    hoststr = ''.join(chr(len(x))+x for x in host.split('.'))
+    data = '%s\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00%s\x00\x00\x01\x00\x01' % (index, hoststr)
+    data = struct.pack('!H', len(data)) + data
+    if host not in dnscache:
+        with dnslock:
+            if host not in dnscache:
+                sock = None
+                try:
+                    sock = socket.socket(socket.AF_INET6 if ':' in dnsserver else socket.AF_INET)
+                    sock.connect((dnsserver, 53))
+                    sock.sendall(data)
+                    rfile = sock.makefile('rb')
+                    size = struct.unpack('!H', rfile.read(2))[0]
+                    data = rfile.read(size)
+                    iplist = re.findall('\xC0.\x00\x01\x00\x01.{6}(.{4})', data)
+                    iplist = ['.'.join(str(ord(x)) for x in s) for s in iplist]
+                    logging.info('dns_resolve(host=%r) return %s', host, iplist)
+                    dnscache[host] = iplist
+                except socket.error, e:
+                    logging.exception('dns_resolve(host=%r) fail:%s', host, e)
+                finally:
+                    if sock:
+                        sock.close()
+    return dnscache.get(host, [])
+
 _httplib_HTTPConnection_putrequest = httplib.HTTPConnection.putrequest
 def httplib_HTTPConnection_putrequest(self, method, url, skip_host=0, skip_accept_encoding=1):
-    if common.GOOGLE_CRLF and self.host.endswith('.appspot.com'):
+    if common.WEST_ENABLE:
         self._output('\r\n')
     return _httplib_HTTPConnection_putrequest(self, method, url, skip_host, skip_accept_encoding)
 httplib.HTTPConnection.putrequest = httplib_HTTPConnection_putrequest
@@ -420,7 +488,7 @@ class CertUtil(object):
 class SimpleMessageClass(object):
 
     def __init__(self, fp, seekable = 0):
-        self.dict = dict = {}
+        self.dict = dict = {} # ? 此处把dict关键词给覆盖了，不懂是一种需要还是一个失误。我不确定，所以没改成self.dic = dic = {}
         self.headers = headers = []
         readline = getattr(fp, 'readline', None)
         headers_append = headers.append
@@ -447,6 +515,12 @@ class SimpleMessageClass(object):
 
     def get(self, name, default=None):
         return self.dict.get(name.title(), default)
+
+    # 元编程实现下列冗余代码。不过由于由于该SimpleMessageClass是python2.6的新式类，所以
+    # 无法用__getattr__获取*操作符重载*函数
+    # 此处可商榷，本来是仿rfc822.py写的 by phus
+    #def __getattr__(self, attrname):
+    #    return getattr(self.dict, attrname)
 
     def iteritems(self):
         return self.dict.iteritems()
@@ -688,9 +762,15 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def do_CONNECT(self):
         host, _, port = self.path.rpartition(':')
-        if host.endswith(common.GOOGLE_SITES) and host not in common.GOOGLE_WITHGAE:
+        if host in common.HOSTS:
             return self.do_CONNECT_Direct()
-        elif host in common.HOSTS:
+        elif common.WEST_ENABLE and host.endswith(common.WEST_SITES):
+            if host not in common.HOSTS:
+                logging.info('west dns_resolve(host=%r, dnsserver=%r)', host, common.WEST_DNS)
+                common.HOSTS[host] = dns_resolve(host, common.WEST_DNS)[-1]
+            return self.do_CONNECT_Direct()
+        elif host.endswith(common.GOOGLE_SITES) and host not in common.GOOGLE_WITHGAE:
+            common.HOSTS[host] = common.GOOGLE_HOSTS[0]
             return self.do_CONNECT_Direct()
         elif common.HOSTS_ENDSWITH_TUPLE and host.endswith(common.HOSTS_ENDSWITH_TUPLE):
             ip = (ip for p, ip in common.HOSTS_ENDSWITH_DICT.iteritems() if host.endswith(p)).next()
@@ -698,15 +778,16 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 logging.info('try resolve %r', host)
                 ip = socket.gethostbyname(host)
             common.HOSTS[host] = ip
-            self.do_CONNECT_Direct()
+            return self.do_CONNECT_Direct()
         else:
-            return self.do_CONNECT_Thunnel()
+            return self.do_CONNECT_Tunnel()
 
     def do_CONNECT_Direct(self):
         try:
             logging.debug('LocalProxyHandler.do_CONNECT_Directt %s' % self.path)
             host, _, port = self.path.rpartition(':')
             idlecall = None
+            data = ''
             if not common.PROXY_ENABLE:
                 if host.endswith(common.GOOGLE_SITES):
                     conn = MultiplexConnection(common.GOOGLE_HOSTS, int(port))
@@ -727,7 +808,11 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 if common.PROXY_USERNAME and 'Proxy-Authorization' not in self.headers:
                     self.headers['Proxy-Authorization'] = 'Basic %s' + base64.b64encode('%s:%s'%(common.PROXY_USERNAME, common.PROXY_PASSWROD))
                 data = '%s %s:%s %s\r\n%s\r\b' % (self.command, ip, port, self.protocol_version, self.headers)
-                sock.sendall(data)
+            if data:
+                if common.WEST_ENABLE and host.endswith(common.WEST_SITES):
+                    sock.sendall('\r\n'+data)
+                else:
+                    sock.sendall(data)
             socket_forward(self.connection, sock, idlecall=idlecall)
         except:
             logging.exception('LocalProxyHandler.do_CONNECT_Direct Error')
@@ -738,7 +823,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             except:
                 pass
 
-    def do_CONNECT_Thunnel(self):
+    def do_CONNECT_Tunnel(self):
         # for ssl proxy
         host, _, port = self.path.rpartition(':')
         keyFile, crtFile = CertUtil.getCertificate(host)
@@ -762,9 +847,9 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 else:
                     self.path = 'https://%s%s' % (self._realpath, self.path)
                 self.requestline = '%s %s %s' % (self.command, self.path, self.protocol_version)
-            self.do_METHOD_Thunnel()
+            self.do_METHOD_Tunnel()
         except socket.error, e:
-            logging.exception('do_CONNECT_Thunnel socket.error: %s', e)
+            logging.exception('do_CONNECT_Tunnel socket.error: %s', e)
         finally:
             try:
                 self.connection.shutdown(socket.SHUT_WR)
@@ -776,23 +861,29 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def do_METHOD(self):
         host = self.headers['Host']
-        if host.endswith(common.GOOGLE_SITES) and host not in common.GOOGLE_WITHGAE:
+        if host in common.HOSTS:
+            return self.do_METHOD_Direct()
+        elif common.WEST_ENABLE and host.endswith(common.WEST_SITES):
+            if host not in common.HOSTS:
+                logging.info('west dns_resolve(host=%r, dnsserver=%r)', host, common.WEST_DNS)
+                common.HOSTS[host] = dns_resolve(host, common.WEST_DNS)[-1]
+            return self.do_METHOD_Direct()
+        elif host.endswith(common.GOOGLE_SITES) and host not in common.GOOGLE_WITHGAE:
             if host in common.GOOGLE_FORCEHTTPS:
                 self.send_response(301)
                 self.send_header('Location', self.path.replace('http://', 'https://'))
                 self.end_headers()
                 return
-            return self.do_METHOD_Direct()
-        elif host in common.HOSTS:
+            common.HOSTS[host] = common.GOOGLE_HOSTS[0]
             return self.do_METHOD_Direct()
         elif common.HOSTS_ENDSWITH_TUPLE and host.endswith(common.HOSTS_ENDSWITH_TUPLE):
             ip = (ip for p, ip in common.HOSTS_ENDSWITH_DICT.iteritems() if host.endswith(p)).next()
             if not ip and not common.PROXY_ENABLE:
                 ip = socket.gethostbyname(host)
             common.HOSTS[host] = ip
-            self.do_METHOD_Direct()
+            return self.do_METHOD_Direct()
         else:
-            return self.do_METHOD_Thunnel()
+            return self.do_METHOD_Tunnel()
 
     def do_METHOD_Direct(self):
         scheme, netloc, path, params, query, fragment = urlparse.urlparse(self.path, 'http')
@@ -805,6 +896,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         try:
             self.log_request()
             idlecall = None
+            data = ''
             if not common.PROXY_ENABLE:
                 if host.endswith(common.GOOGLE_SITES):
                     conn = MultiplexConnection(common.GOOGLE_HOSTS, port)
@@ -826,11 +918,14 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 if common.PROXY_USERNAME and 'Proxy-Authorization' not in self.headers:
                     self.headers['Proxy-Authorization'] = 'Basic %s' + base64.b64encode('%s:%s'%(common.PROXY_USERNAME, common.PROXY_PASSWROD))
                 data ='%s %s %s\r\n%s\r\n'  % (self.command, url, self.request_version, self.headers)
-
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 0:
                 data += self.rfile.read(content_length)
-            sock.sendall(data)
+            if data:
+                if common.WEST_ENABLE and host.endswith(common.WEST_SITES):
+                    sock.sendall('\r\n'+data)
+                else:
+                    sock.sendall(data)
             socket_forward(self.connection, sock, idlecall=idlecall)
         except Exception, ex:
             logging.exception('LocalProxyHandler.do_GET Error, %s', ex)
@@ -841,7 +936,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             except:
                 pass
 
-    def do_METHOD_Thunnel(self):
+    def do_METHOD_Tunnel(self):
         headers = self.headers
         host = headers.get('Host') or urlparse.urlparse(self.path).netloc.partition(':')[0]
         if self.path[0] == '/':
@@ -924,11 +1019,11 @@ class PHPProxyHandler(LocalProxyHandler):
                                 logging.info('Resole php fetchserver address OK. %s', common.HOSTS[fetchhost])
                             except Exception, e:
                                 logging.exception('PHPProxyHandler.setup resolve fail: %s', e)
-        PHPProxyHandler.do_CONNECT = LocalProxyHandler.do_CONNECT_Thunnel
-        PHPProxyHandler.do_GET     = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_POST    = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_PUT     = LocalProxyHandler.do_METHOD_Thunnel
-        PHPProxyHandler.do_DELETE  = LocalProxyHandler.do_METHOD_Thunnel
+        PHPProxyHandler.do_CONNECT = LocalProxyHandler.do_CONNECT_Tunnel
+        PHPProxyHandler.do_GET     = LocalProxyHandler.do_METHOD_Tunnel
+        PHPProxyHandler.do_POST    = LocalProxyHandler.do_METHOD_Tunnel
+        PHPProxyHandler.do_PUT     = LocalProxyHandler.do_METHOD_Tunnel
+        PHPProxyHandler.do_DELETE  = LocalProxyHandler.do_METHOD_Tunnel
         PHPProxyHandler.setup      = BaseHTTPServer.BaseHTTPRequestHandler.setup
         BaseHTTPServer.BaseHTTPRequestHandler.setup(self)
 
